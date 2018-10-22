@@ -1,0 +1,112 @@
+#!/usr/bin/env ansible-playbook
+- hosts: testers
+  gather_facts: no
+  vars:
+    python_cmd: python
+  tasks:
+
+    - setup:
+        gather_subset: min
+        # min includes ansible_python_version
+    - block:
+        # facts:
+        # shell can be 'sh', not 'bash' so we need to limit to strict POSIX
+        # most platforms support dual py2/py3 but we want to use default only
+        # pfsense(bsd/11) python executable is only /usr/local/bin/python2.7
+        # ansible_python_interpreter can be undefined in several cases like
+        # localhost, or can be overriden inside inventory
+        # we cannot validate pkg_mgr because on few platforms the reported
+        # pkg manager is not the command:
+        # - freebsd (pfsense): ansible_pkg_mgr=pkgng but command is `pkg`
+        # - macos: ansible_pkg_mgr=homebrew but command is `brew`
+        - shell: |
+            set -eu
+            distribution=unknown
+            distribution_major_version=unknown
+            pkg_mgr=unknown
+            python_cmd=python
+
+            if [ -f /etc/os-release ]; then
+              . /etc/os-release
+              distribution_major_version=${VERSION_ID%.*}
+              case $NAME in
+                "Red Hat"*) distribution="RedHat"
+                    pkg_mgr=yum
+                    if [ "$distribution_major_version" -ge "8" ]; then
+                      python_cmd=python3
+                      pkg_mgr=dnf
+                    fi
+                    ;;
+                "CentOS"*)
+                    distribution="CentOS"
+                    pkg_mgr=yum
+                    if [ "$distribution_major_version" -ge "8" ]; then
+                      python_cmd=python3
+                      pkg_mgr=dnf
+                    fi
+                    ;;
+                "Fedora"*)
+                    distribution="Fedora"
+                    pkg_mgr=yum
+                    if [ "$distribution_major_version" -ge "28" ]; then
+                     python_cmd=python3
+                     pkg_mgr=dnf
+                    fi
+                    ;;
+                "Ubuntu"*)
+                    distribution="Ubuntu"
+                    pkg_mgr=apt
+                    ;;
+                "Debian"*)
+                    distribution="Debian"
+                    pkg_mgr=apt
+                    ;;
+              esac
+            elif [ -f /etc/lsb-release ]; then
+              . /etc/lsb-release
+              distribution=${DISTRIB_ID}xx
+              distribution_major_version=${DISTRIB_RELEASE%.*}
+            elif [ -f /etc/debian_version ]; then
+              distribution="Debian"
+              distribution_major_version=$(cat /etc/debian_version | cut -d. -f1)
+            else
+               # Covers for FreeBSD and many others
+               distribution=$(uname -s)
+               if [ $distribution = Darwin ]; then
+                 distribution="MacOSX"
+                 distribution_major_version=$(sw_vers -productVersion | cut -d. -f1)
+                 pkg_mgr=homebrew
+               else
+                 distribution_major_version=$(uname -r | cut -d. -f1)
+                 pkg_mgr=pkgng
+               fi
+               which $python_cmd 2>&1 >/dev/null || {
+                   python_cmd=/usr/local/bin/python2.7
+               }
+            fi
+
+            export distribution
+            export distribution_major_version
+            export pkg_mgr
+            export python_cmd
+            
+
+            echo $distribution
+            echo $distribution_major_version
+            echo $pkg_mgr
+            echo $python_cmd
+            
+            # just to validate that detection logic worked for python
+            $python_cmd --version >/dev/null
+            
+          register: platform
+          changed_when: false
+          failed_when: platform.rc != 0 or platform.stdout_lines[0] != ansible_distribution or platform.stdout_lines[1] != ansible_distribution_major_version or ansible_pkg_mgr != platform.stdout_lines[2]
+
+        - set_fact:
+            python_cmd: "{{ platform.stdout_lines[3] }}"
+      
+      always:
+        - debug:
+            msg: |
+                {{ "%s %s is using %s and %s" | format(ansible_distribution, ansible_distribution_major_version, ansible_pkg_mgr, python_cmd) }}
